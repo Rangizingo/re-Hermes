@@ -4,17 +4,17 @@ Read only. Nothing was run: no hermes, no model, no network, no ssh. Nothing und
 
 ## Sources and labels
 
-- **HEAD**: `/Users/peterb/Documents/AI/hermes-agent` at `97a9ae8ee5` (2026-10-11, tag `rc.11-v0.21.7-55`). Code citations are HEAD unless marked. Paths are relative to that root.
+- **HEAD**: `/Users/peterb/Documents/AI/hermes-agent` at `97a9ae8ee5` (2026-10-11, tag `rc.11-v0.21.7`, 55 commits past it). Code citations are HEAD unless marked. Paths are relative to that root.
 - **59004a623** (2026-09-25): Peter's ai-core build per his notes. An ancestor of HEAD. HEAD has 7,742 more commits (counted with `git rev-list`). Peter's line numbers match this commit (checked: `agent/system_prompt.py:41-52` holds `_model_gate`, `agent/prompt_builder.py:359-370` holds `TOOL_USE_ENFORCEMENT_MODELS`).
 - **d604141** (2026-07-21): installed build at `/Users/peterb/.hermes/hermes-agent`. An ancestor of 59004a623. Grep checks only, no diff.
 - Labels: **counted** = grep or AST count of source. **est.** = chars/4 of string literals, or arithmetic. **not run** = not executed. Config values are marked as config values.
 
 ## Short version
 
-- One loop iteration makes one model call, plus any retries inside it (`agent/turn_iteration_prep.py:402`). Tool calls loop back. A text answer ends the turn.
-- Default config defers six core tools and every MCP tool behind a three-tool bridge. A simple MCP lookup takes 3 to 4 model calls. The floor is 2.
-- Three things add calls with no tool result: the stall guard, skill loads the prompt asks for, and background review after the turn.
-- Fixed prompt text is about 1,275 to 1,375 tokens (est.) per request. The skills index, memory, and tool schemas come on top.
+- One loop iteration makes one model call, plus any retries inside it (`agent/turn_iteration_prep.py:402`). Tool calls loop back. A text answer ends the turn unless a continuation guard fires (`agent/turn_final_response.py:249`, `:318`).
+- Default config defers six core tools (`hermes_cli/config_defaults.py:2018-2025`) and every MCP tool (`tools/tool_search.py:149-161`) behind a three-tool bridge. A simple MCP lookup takes 3 to 4 model calls (est., not run; tool_search, tool_describe, tool_call, then text). The floor is 2 calls (est., not run; tool_call, then text).
+- Three things add calls with no tool result: the stall guard (`agent/turn_final_response.py:172-249`), skill loads the prompt asks for (path not traced), and background review after the turn (`agent/turn_facade.py:41`).
+- Fixed prompt text is about 1,317 to 1,358 tokens (est.) per request. The skills index, memory, and tool schemas come on top.
 
 ## 1. Entry points
 
@@ -54,7 +54,7 @@ The loop is `agent/conversation_loop.py:1648-1696`.
 
 - Text answer: `agent/turn_final_response.py:376`.
 - Interrupt: `agent/turn_iteration_prep.py:382`.
-- Iteration budget spent: `agent/turn_iteration_prep.py:412`, then one grace call (`agent/conversation_loop.py:1649`).
+- Iteration budget spent: the loop breaks at `agent/turn_iteration_prep.py:416`. A grace call follows only a codex reasoning-only fallback (`agent/turn_truncation.py:635`).
 - Error and recovery exits: `turn_api_error.py`, `turn_recovery*.py` (not traced in full).
 - No default cap on calls. `run_agent.py:241` defaults `max_iterations` to `sys.maxsize`. `agent.max_turns` defaults to `None` (`hermes_cli/config_defaults.py:78`), which resolves to `sys.maxsize` (`hermes_cli/config.py:1833`). The area guide says the default is 500 (`agent/AGENTS.md`). That is stale.
 
@@ -71,29 +71,29 @@ The system prompt is built once per session into three cached tiers: stable, con
 | 3 | Help guidance | `agent/prompt_builder.py:170`, `:182`; `agent/system_prompt.py:746-757` | Always. The no-skills variant (`:182`) is used when skill tools or the hermes-agent skill are missing. | 600 chars, ~150 tokens (est.). No-skills variant: 466 chars. |
 | 4 | Task completion guidance | `agent/prompt_builder.py:382`; `agent/system_prompt.py:556-562`; flag `hermes_cli/config_defaults.py:184` | Tools visible and flag on (default on) | 769 chars, ~192 tokens (est.) |
 | 5 | Parallel tool-call guidance | `agent/prompt_builder.py:419`; `agent/system_prompt.py:556-562`; flag `hermes_cli/config_defaults.py:188` | Same as row 4 | 618 chars, ~154 tokens (est.) |
-| 6 | Steer channel note | `agent/prompt_builder.py:603`; `agent/system_prompt.py:566-567` | Tools visible | 572 chars, ~143 tokens (est.) |
-| 7 | Memory guidance | `agent/prompt_builder.py:192-230`; `agent/system_prompt.py:281-286` | Memory tool visible (eager by default) | 1,100 to 1,500 chars, ~275 to 375 tokens (est.) |
+| 6 | Steer channel note | `agent/prompt_builder.py:603`; `agent/system_prompt.py:566-567` | Tools visible | 771 chars rendered (counted; the literal template is 572), about 193 tokens (est.) |
+| 7 | Memory guidance | `agent/prompt_builder.py:192-230`; `agent/system_prompt.py:281-286` | Memory tool visible (eager by default) | 964 to 1,128 chars (1,036 at defaults), about 241 to 282 tokens (est.) |
 | 8 | Session search guidance | `agent/prompt_builder.py:237`; `agent/system_prompt.py:294` | Only if `session_search` is visible. Deferred by default, so usually absent. | 186 chars, ~46 tokens (est.) |
-| 9 | Skills guidance | `agent/prompt_builder.py:258`; `agent/system_prompt.py:295` | `skill_manage` visible (eager by default) | 421 chars, ~105 tokens (est.) |
+| 9 | Skills guidance | `agent/prompt_builder.py:258`; `agent/system_prompt.py:295` | `skill_manage` visible (eager by default) | 441 chars rendered (counted; literal is 421), about 110 tokens (est.) |
 | 10 | Async handoff guidance | `agent/prompt_builder.py:394`; `agent/system_prompt.py:581-582` | `delegate_task` visible. Gone when delegation is disabled. | 487 chars, ~121 tokens (est.) |
-| 11 | Tool-use enforcement, execution, Google guidance | `agent/prompt_builder.py:347`, `:361`, `:375`, `:544`; `agent/system_prompt.py:572-578` | Only when the model name contains a listed substring | 824 and 860 chars when they match (counted). Off for Peter's model name per his note (not re-checked). |
-| 12 | Coding brief and git snapshot | `agent/coding_context.py:30`, `:364`, `:399`; `agent/system_prompt.py:664-693` | Only cli, tui, acp, desktop with a code workspace. Not Telegram (`agent/coding_context.py:30`). | Not counted |
-| 13 | Skills index | `agent/prompt_builder.py:1361-1600`; header `:1433-1495`; `agent/system_prompt.py:301-314`, `:783` | A skill tool is visible. Volatile tier. | Header 1,500 to 1,900 chars, ~375 to 475 tokens (est.). Plus one line per visible skill (not counted). This repo ships 58 bundled `SKILL.md` files (counted). |
+| 11 | Tool-use enforcement, execution, Google guidance | `agent/prompt_builder.py:347`, `:361`, `:375`, `:544`; `agent/system_prompt.py:572-578` | Only when the model name contains a listed substring | 824 chars (`agent/prompt_builder.py:347`) and 860 chars (`:544`), counted. Applies only when the setting is auto (default) and the model name matches. Off for Peter's model name per his note (not re-checked). |
+| 12 | Coding brief and git snapshot | `agent/coding_context.py:30`, `:364`, `:399`; `agent/system_prompt.py:664-693` | Only cli, tui, acp, desktop, and the empty platform string, with a code workspace. Not Telegram (`agent/coding_context.py:30`). | Not counted |
+| 13 | Skills index | `agent/prompt_builder.py:1361-1600`; header `:1433-1495`; `agent/system_prompt.py:301-314`, `:783` | A skill tool is visible. Volatile tier. | Header 1,175 to 1,189 chars (counted, `agent/prompt_builder.py:1475-1495`). Hidden notes add 175 chars (`:1445`) and about 201 chars plus skill names (`:1450`, est.), so the full header is about 1,551 to 1,565 chars (est.). Plus one line per visible skill (not counted). This repo ships 58 bundled `SKILL.md` files (counted). |
 | 14 | Pinned skills (`skills.auto_load`) | `agent/system_prompt.py:317-341` | Only if configured | Not counted |
 | 15 | MEMORY.md and USER.md | `agent/system_prompt.py:516-541`; limits `hermes_cli/config_defaults.py:1319-1320` | Memory enabled. Volatile tier. | Limits 2,200 and 1,375 chars (config values). The config comment says ~800 and ~500 tokens. |
 | 16 | External memory provider block | `agent/system_prompt.py:529-540`; `agent/memory_manager.py:501` | Only with a provider | Not counted |
-| 17 | Project context file | `agent/prompt_builder.py:1857`; `agent/system_prompt.py:713-726` | One file type loads, first found wins: `.hermes.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules` | Floor 20,000 chars. Scales with the window, ceiling 500,000 (`agent/prompt_builder.py:1161`, `:1171-1191`). |
+| 17 | Project context file | `agent/prompt_builder.py:1857`; `agent/system_prompt.py:713-726` | First found wins among `.hermes.md` or `HERMES.md` (walks to the git root), `AGENTS.md`, `CLAUDE.md`, `.cursorrules`. `.cursor/rules/*.mdc` also loads (`agent/prompt_builder.py:1863-1864`) | Floor 20,000 chars. Scales with the window, ceiling 500,000 (`agent/prompt_builder.py:1161`, `:1171-1191`). |
 | 18 | Timestamp, profile line, env hints, env probe | `agent/system_prompt.py:489`, `:373`, `:701-706`; `agent/prompt_builder.py:1142` | Always. Env probe on by default (`hermes_cli/config_defaults.py:192`). | Small. Not counted. |
-| 19 | Telegram platform hint | `agent/prompt_builder.py:681` (dict), `:696` (telegram value); `agent/system_prompt.py:445`, `:709` | Always on Telegram | 535 chars, ~134 tokens (est.) |
+| 19 | Telegram platform hint | `agent/prompt_builder.py:681` (dict), `:696` (telegram value); `agent/system_prompt.py:445`, `:709` | Always on Telegram | 617 chars rendered (counted; the literal template is 535), about 154 tokens (est.) |
 | 20 | Telegram rich-messages add-on | `agent/prompt_builder.py:852`; `agent/system_prompt.py:459-472` | Only when `_telegram_rich_messages_enabled()` is true. Default not traced. | 863 chars, ~216 tokens (est.) |
 | 21 | Caller system message, ephemeral system prompt | `agent/system_prompt.py:771-772`; `agent/turn_context.py:1339-1341` | Only when set | Not counted |
 
 **Outside the system prompt, per request**
 
-- Memory recall and `pre_llm_call` plugin text go into the current user message at API time (`agent/turn_context.py:108-133`, `:793-849`, `:893-931`). Only for non-trivial prompts. The system prompt stays byte-stable.
+- Memory recall and `pre_llm_call` plugin text go into the current user message at API time (`agent/turn_context.py:108-133`, `:793-849`, `:893-931`). Memory recall skips trivial prompts (`agent/turn_context.py:921`); `pre_llm_call` text does not. The system prompt stays byte-stable.
 - MoA aggregate (`agent/turn_request_assembly.py:129-130`) and prefill rows (`:133-138`), only when configured.
 
-**Fixed blocks, Telegram with tools, memory, skill tools, and delegation on.** Rows 3 to 7, 9, 10, and 19. Total 5,100 to 5,500 chars (counted from literals; row 7 is a range), about 1,275 to 1,375 tokens (est., chars/4). The skills header, memory, context file, and tool schemas come on top.
+**Fixed blocks, Telegram with tools, memory, skill tools, and delegation on.** Rows 3 to 7, 9, 10, and 19. Rendered total 5,267 to 5,431 chars (counted; literal-only would be 4,966 to 5,130), about 1,317 to 1,358 tokens (est., chars/4). The skills header, memory, context file, and tool schemas come on top.
 
 ## 4. Tool schemas
 
@@ -105,8 +105,8 @@ The system prompt is built once per session into three cached tiers: stable, con
 
 - Core list: **55** names (`toolsets.py:11-41`). Platform bundles built by `_bundle` start from it (`toolsets.py:55-57`). `hermes-telegram` adds no extras (`toolsets.py:208`).
 - `kanban_*` names: **14**. Only for kanban workers and profiles with the kanban toolset (`tools/kanban_tools.py:84-100`, gate at `:1315`). Not in chat.
-- Default-deferred: **6** (`hermes_cli/config_defaults.py:2018-2025`): `session_search`, `todo_list`, `process_manage`, `cronjob_manage`, `image_generate`, `computer_use`.
-- Eager candidates: **35**. Plus 3 bridge tools when the bridge is on. So up to **38** names per request, before `check_fn` gates. Browser, voice, and connector tools may drop out.
+- Default-deferred: **18** names (`hermes_cli/config_defaults.py:2018-2025`, counted). Six are core tools: `session_search`, `todo_list`, `process_manage`, `cronjob_manage`, `image_generate`, `computer_use`. Twelve are desktop GUI names, such as `drive_preview`.
+- Eager candidates for the default bundle: **49** (55 core names minus 6 deferred; `toolsets.py:11-41`, `hermes_cli/config_defaults.py:2018-2025`). Plus 3 bridge tools when the bridge is on, so up to **52** names per request before `check_fn` gates. The 14 kanban names drop out only at `check_fn` (`tools/kanban_tools.py:90`), so the count after that is lower (not run). Browser, voice, and connector tools may drop out too.
 
 **Deferral rule**: `tools/tool_search.py:149-168`. A tool defers if it is in the defer list, or it is an MCP tool (toolset starts with `mcp-`), or it is a plugin tool. MCP tools defer no matter what the list says. The 59004a623 build has the same rule (`tools/tool_search.py:150-162`).
 
@@ -118,30 +118,30 @@ The system prompt is built once per session into three cached tiers: stable, con
 
 The listing embedded in the search description is capped at 4,000 tokens (config value, `hermes_cli/config_defaults.py:2014`; budget logic at `tools/tool_search.py:208-213`). It goes out on every request.
 
-**Schema bytes**: not measured (not run). The schemas are built in code, not literal dicts. A static scan found none of the 35 (not run as a runtime count). Peter's note says 41,218 chars for the 19-tool array on ai-core. Not checked here.
+**Schema bytes**: not measured (not run). Literal `"parameters": {` blocks appear in 48 files under `tools/` (counted with `git grep -l`), so some schemas are literal dicts. Peter's note says 41,218 chars for the 19-tool array on ai-core. Not checked here.
 
 ## 5. History and compression
 
-- **Storage**: SQLite `SessionDB` (`hermes_state.py:461`). A flush happens before each tool round (`agent/turn_tool_round.py:127-130`) and at turn end.
-- **Replay**: a resumed session loads its persisted history (`agent/turn_context.py:705-751`). Every request sends the full transcript, canonicalized (`agent/turn_context.py:1236-1262`). No sliding window. Only compression shortens it (`agent/AGENTS.md`, invariants and compression sections).
-- **Trigger**: `compression.threshold` is 0.50 (`hermes_cli/config_defaults.py:589`; same value in 59004a623 at `:565`). `ContextCompressor` derives the trigger from the window (`agent/context_compressor.py:2651`, used at `:2691`). `should_compress_info` (`:2998`) compares the last prompt token count with `threshold_tokens`.
+- **Storage**: SQLite `SessionDB` (`hermes_state.py:461`). A flush happens before each tool round (`agent/turn_tool_round.py:127-130`) and at turn end (`agent/turn_final_response.py:364`).
+- **Replay**: a resumed session loads its persisted history (`agent/turn_context.py:705-751`). Every request sends the full transcript. Only the replayed prefix (rows before this turn's user message) is canonicalized (`agent/turn_context.py:1236-1263`). No sliding window. On the default path only compression shortens it (`agent/AGENTS.md:59`). Two other paths truncate: `agent/codex_runtime_history_seed.py:63-64` and `gateway/platforms/api_server.py:406`.
+- **Trigger**: `compression.threshold` is 0.50 (`hermes_cli/config_defaults.py:589`; same value in 59004a623 at `:565`). Windows under 512K use at least 0.75 (`agent/context_compressor.py:2757-2758`; constants at `:1150-1151`). `ContextCompressor` derives the trigger from the window (`agent/context_compressor.py:2651`, used at `:2691`). `should_compress_info` (`:2998`) compares the last prompt token count with `threshold_tokens`.
   - Before each request: `agent/turn_preflight_gate.py:20`.
   - After each tool round: `agent/turn_preflight.py:244`, called at `agent/turn_tool_round.py:202`.
-- **Method**: prune old tool results first, with no model call. Then a structured summary from the compression aux model (`agent/AGENTS.md`, compression section). That summary is one extra model call on the same engine slot. Aux timeout 120 s (`hermes_cli/config_defaults.py:765`). Retry rounds capped at 3 (`hermes_cli/config_defaults.py:609`).
+- **Method**: prune old tool results first, with no model call. Then a structured summary from the compression aux model (`agent/AGENTS.md`, compression section). That summary is one extra model call (`agent/AGENTS.md:85-86`). On Peter's box it shares the one engine slot (his notes, not run). Aux timeout 120 s (`hermes_cli/config_defaults.py:765`). Retry rounds capped at 3 (`hermes_cli/config_defaults.py:609`).
 - **Gateway hygiene**: 0.85 threshold and a 5,000-message hard limit (`gateway/run_turn.py:679-685`; `hermes_cli/config_defaults.py:633`).
 - **Micro-compaction**: off by default (`hermes_cli/config_defaults.py:626`).
-- **Caps before history**: terminal output 50,000 chars and 2,000 lines (`hermes_cli/config_defaults.py:555`). File reads 100,000 chars (`hermes_cli/config_defaults.py:528`).
+- **Caps before history**: terminal output 50,000 chars (`hermes_cli/config_defaults.py:552-555`, `max_bytes`). A `read_file` call may request at most 2,000 lines (`max_lines`, `:553`, same block). File reads 100,000 chars (`hermes_cli/config_defaults.py:528`).
 
 ## 6. Rounds per turn: "check my inbox"
 
 Assumes Telegram, default config, a gmail MCP tool, and an email skill that matches.
 
-- **Floor: 2 model calls.** Call 1 returns a tool call. Call 2 returns text (`agent/turn_tool_round.py:230`; `agent/turn_final_response.py:376`). This needs the tool to be eager. Default config does not make MCP tools eager.
-- **Default, MCP deferred: 3 to 4 calls.** `tool_search`, then `tool_describe` (skippable when the model already knows the parameters), then `tool_call`, then the answer.
-- **Skill mandate**: `agent/prompt_builder.py:1475-1494` tells the model to load any matching skill with `skill_view` before acting. Each load adds one call. The model decides.
+- **Floor: 2 model calls.** Call 1 returns a tool call. Call 2 returns text (`agent/turn_tool_round.py:230`; `agent/turn_final_response.py:376`). This needs the tool to be eager. Default config does not make MCP tools eager (`hermes_cli/config_defaults.py:1999` sets `enabled: auto`; MCP tools are deferrable at `tools/tool_search.py:149-161`).
+- **Default, MCP deferred: 3 to 4 calls** (bridge at `tools/tool_search.py:273`, loop at `agent/conversation_loop.py:1648`). `tool_search`, then `tool_describe` (skippable when the model already knows the parameters), then `tool_call`, then the answer.
+- **Skill mandate**: `agent/prompt_builder.py:1475-1494` tells the model to load any matching skill with `skill_view` before acting. Each load adds one call (`agent/turn_tool_round.py:230`). The model decides.
 - **Stall guard**: if the answer ends on a phrase like "let me now", +1 call (`agent/agent_runtime_helpers.py:3428-3431`, text up to 400 chars). Max 2 per turn (`agent/turn_final_response.py:183`, `:196`, `:208`). Logged at `:220`. On by default (`hermes_cli/config_defaults.py:181`).
 - **Dropped tool call** (`finish_reason` says tool calls, none present): +1 call, max 3 in a row (`agent/turn_final_response.py:291-294`).
-- **Empty response**: +1 call per retry, budget 3, jittered wait 5 to 60 s (`agent/empty_response_guard.py:54`; `agent/turn_empty_response.py:46-70`). Post-tool empty nudge: +1 once per tool round (`agent/turn_empty_response.py:198-220`).
+- **Empty response**: +1 call per retry, budget 3 by default, or 1 when one attempt's estimated cost passes the threshold (default $0.25; `agent/empty_response_guard.py:56`, `:230-236`), jittered wait 5 to 60 s (`agent/empty_response_guard.py:54`; `agent/turn_empty_response.py:46-70`). Post-tool empty nudge: +1 once per tool round (`agent/turn_empty_response.py:198-220`).
 - **Open reasoning tag**: up to 2 retries (`agent/turn_response_intake.py:163-170`).
 - **Over-threshold request**: +1 summary call (`agent/turn_preflight_gate.py:20`).
 - **Approval guardian**: an LLM call only for commands the danger check flags (`approvals.mode` is `"smart"`, `hermes_cli/config_defaults.py:1679`; `tools/approval.py:753`). Not traced for MCP calls.
@@ -152,7 +152,7 @@ Assumes Telegram, default config, a gmail MCP tool, and an email skill that matc
   - Every 10 user turns (`agent/turn_context.py:752-763`; config value `hermes_cli/config_defaults.py:1322`).
   - After 10 tool iterations without `skill_manage` (`agent/agent_init.py:1380-1382`; `agent/turn_iteration_prep.py:166-167`; `agent/turn_finalizer.py:763-768`).
   - On by default (`hermes_cli/config_defaults.py:811`). The code comment at `agent/turn_finalizer.py:779` says the fork costs about 30K tokens per event (not measured).
-- **Title generation**: first 1 to 3 turns of an untitled session (`agent/turn_context.py:196-232`; `agent/title_generator.py:736`; `hermes_cli/config_defaults.py:774-776`). The code says at most three calls.
+- **Title generation**: first 1 to 3 turns of a session with a placeholder title (`agent/turn_context.py:196-232`; `agent/title_generator.py:736`; `hermes_cli/config_defaults.py:774-776`). Untitled sessions are retried each turn (`agent/title_generator.py:756`). The code says a placeholder gets turns 2-3, at most three calls (`:757`).
 
 **Not on the default path**
 
@@ -163,16 +163,16 @@ Assumes Telegram, default config, a gmail MCP tool, and an email skill that matc
 - Memory query rewrite: only with its memory plugin (`plugins/memory/query_rewrite.py:5`).
 - Curator: inactivity-triggered skill review, not per turn (`agent/curator.py:3`).
 
-**Total for this request**: 2 at the floor. 3 to 4 with the default MCP deferral. Add 1 per skill load and 1 per stall (max 2). Peter's note says 5 calls (not run here). That fits the range.
+**Total for this request**: 2 at the floor (`agent/turn_tool_round.py:230`). 3 to 4 with the default MCP deferral (`tools/tool_search.py:273`). Add 1 per skill load and 1 per stall (max 2). Peter's note says 5 calls (not run here). That fits the range.
 
 ## 7. Top 5 cost cuts
 
 Ranked by model rounds removed per turn. Costs are estimates from code paths, not runs.
 
 1. **Tool deferral.** `tools/tool_search.py:149-168`, `:196-205`. Defer list `hermes_cli/config_defaults.py:2018-2025`. Bridge skip at `model_tools.py:532-533`.
-   - Cost: 1 to 2 extra calls per deferred tool use. Listing up to 4,000 tokens on every request (config value).
+   - Cost: 1 to 2 extra calls per deferred tool use (`tools/tool_search.py:273`). Listing up to 4,000 tokens on every request (config value, `hermes_cli/config_defaults.py:2014`).
    - Fix: `tools.tool_search.enabled: "off"` (`hermes_cli/config_defaults.py:1991-1999`). Skips assembly, so every tool is eager again, including the six default-deferred core tools.
-   - Risk: a bigger tool array on every request. Cached after the first call, size not measured. A small model may pick tools less well with more visible tools (not measured).
+   - Risk: a bigger tool array on every request. Size not measured. A small model may pick tools less well with more visible tools (not measured).
 
 2. **Stall guard.** `agent/turn_final_response.py:180-205`. Trailing check `agent/agent_runtime_helpers.py:3428-3431`. Config `agent.stall_guards` (`hermes_cli/config_defaults.py:181`, read at `agent/agent_init.py:1418-1421`).
    - Cost: +1 call per stall, max 2 per turn (est.).
@@ -180,7 +180,7 @@ Ranked by model rounds removed per turn. Costs are estimates from code paths, no
    - Risk: a model that says "let me now" and stops will end the turn with no action. The config comment says the guard exists for that failure (`hermes_cli/config_defaults.py:178-181`). Count the "Stall guard" log lines in `agent.log` before turning it off.
 
 3. **Skill mandate and index.** `agent/prompt_builder.py:1475-1494`. Header `:1433-1495`. Index build `agent/system_prompt.py:301-314`.
-   - Cost: +1 call per skill loaded. Header ~375 to 475 tokens (est.), plus one line per visible skill. It sits in the volatile tier, so any change re-prefills from there (`agent/system_prompt.py:781-783`).
+   - Cost: +1 call per skill loaded (`agent/turn_tool_round.py:230`). Header about 300 tokens (est.; about 1,190 chars at `agent/prompt_builder.py:1475-1495`), plus one line per visible skill. It sits in the volatile tier, so any change re-prefills from there (`agent/system_prompt.py:781-783`).
    - Fix: shorten the mandate text, hide unused skills, shorten descriptions. Peter's D1 and H6 plans aim here.
    - Risk: the model misses a skill it needed. Skills hold procedures, so a miss costs quality.
 
@@ -190,11 +190,11 @@ Ranked by model rounds removed per turn. Costs are estimates from code paths, no
    - Risk: no automatic memory or skill saves. The config comment says `/refine` still works (`hermes_cli/config_defaults.py:800-811`).
 
 5. **Fixed guidance blocks.** `agent/prompt_builder.py:382`, `:419`, `:603`, `:192`, `:258`, `:394`. Gates in `agent/system_prompt.py:553-583`.
-   - Cost: about 1,275 to 1,375 tokens (est.) per request with the Telegram hint. Cheap while the prefix caches. A cache miss re-prefills it.
+   - Cost: about 1,317 to 1,358 tokens (est.) per request with the Telegram hint. Cheap while the prefix caches. A changed prefix re-prefills from there (`agent/system_prompt.py:781-782`).
    - Fix: `agent.task_completion_guidance: false` (`hermes_cli/config_defaults.py:184`) and `agent.parallel_tool_call_guidance: false` (`:188`). Delegation off already drops the async block (Peter did this).
    - Risk: the task-completion block pushes persistence. The parallel block drives parallel calls, and cutting it can cost time. Test one at a time.
 
-Title generation is a sixth side call and cheap to cut. `auxiliary.title_generation.model_upgrade_enabled: false` keeps the derived title (`hermes_cli/config_defaults.py:776` comment). It is not in the top five.
+Title generation is the sixth cost item and cheap to cut. `auxiliary.title_generation.model_upgrade_enabled: false` keeps the derived title (`hermes_cli/config_defaults.py:776` comment). It is not in the top five.
 
 ## Versus the other builds
 
@@ -214,14 +214,14 @@ d604141 keeps its defaults in `hermes_cli/config.py`. It has no `config_defaults
 
 | Note says | Source says | Status |
 |---|---|---|
-| Line refs such as `agent/system_prompt.py:41-52` | 59004a623 matches them. HEAD does not. | Notes match 59004a623. This doc uses HEAD lines. |
-| Tool Search defers MCP tools; bridge always on | Same rule at 59004a623 and HEAD | Confirmed for the ai-core commit |
-| "Patch 04" pin list keeps tools visible | No per-tool pin in 59004a623 or HEAD. Only `enabled` and `defer` exist. | Not upstream. Lives in his local patch. |
+| Line refs such as `agent/system_prompt.py:41-52` | 59004a623 matches them. HEAD matches for this ref too. | Notes match 59004a623. This doc uses HEAD lines. |
+| Tool Search defers MCP tools; bridge always on | Same rule at 59004a623 and HEAD (`tools/tool_search.py:149-161`, bridge `:196-205`) | Confirmed for the ai-core commit |
+| "Patch 04" pin list keeps tools visible | No per-tool pin key in 59004a623 or HEAD. Config keys at `hermes_cli/config_defaults.py:1991-2026`: `enabled`, `defer`, `threshold_pct`, `listing`, `listing_max_tokens`. | Not upstream. Lives in his local patch. |
 | `agent.max_turns` 150 is a knob | Default `None` (`hermes_cli/config_defaults.py:78`), resolved at `hermes_cli/config.py:1833` | Knob exists. Default unlimited. |
 | Default `max_iterations` 500 (area guide) | `run_agent.py:241` sets `sys.maxsize` | Area guide is stale |
 | Background review about 30K tokens per event | Code comment at `agent/turn_finalizer.py:779` | Comment only. Not measured. |
-| First call 15.7k tokens (20k chars system, 41k chars tools) | Fixed source blocks total about 5,100 to 5,500 chars (est.). Tool bytes not measured here. | Not run. Needs a live run. |
-| Compression fails, 6 to 9 min per try | Code bounds: 120 s per call, max 3 attempts (`hermes_cli/config_defaults.py:765`, `:609`). His plan A2 sets 300 s, which allows about 15 min. | Not run. The bound is in code. |
+| First call 15.7k tokens (20k chars system, 41k chars tools) | Fixed source blocks total about 5,273 chars (est., literal text, Telegram hint included; the six cited blocks alone are 4,410). Tool bytes not measured here. | Not run. Needs a live run. |
+| Compression fails, 6 to 9 min per try | Code bounds: 120 s per call, max 3 attempts (`hermes_cli/config_defaults.py:765`, `:609`). His plan A2 (not in this repo) sets 300 s, which allows about 15 min (3 x 300 s). | Not run. The bound is in code. |
 | Hermes overhead under 1% of turn time | Not measurable without a run | Not run |
 | 86 skills, 8.6k chars in the index | This repo ships 58 bundled `SKILL.md` (counted) | Not run. Count depends on install. |
 
