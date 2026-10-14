@@ -27,5 +27,5 @@ The installed build is older than the source pin, so behavior can differ between
 - Keep every write inside this repo. Never edit either Hermes tree.
 - Cite `file:line` in the target tree for every behavior claim, and the commit it was read at.
 - Label estimates as estimated. Label anything not run as not run.
-- REA's binary tools need Ghidra, which is not installed. Hermes is Python, so readable source is the main artifact.
+- REA's binary tools need Ghidra. Ghidra 12.1.4 is installed through Homebrew. For REA runs, set `GHIDRA_INSTALL_DIR=/opt/homebrew/opt/ghidra/libexec` (already in `~/.zshrc`). Hermes is Python, so readable source is the main artifact.
 - The compliance hook flags 19 upstream files (47 queue entries) for SQL string concatenation. They are upstream code. Review them, don't edit them.
