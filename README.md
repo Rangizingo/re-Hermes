@@ -20,5 +20,5 @@ Reverse engineering of the Hermes Agent (Nous Research, MIT licensed).
 
 ## Known gaps
 
-- REA's binary tools need Ghidra. Ghidra is not installed yet.
+- REA's binary tools need Ghidra. Ghidra 12.1.4 is installed through Homebrew, and REA's Ghidra check passes with `GHIDRA_INSTALL_DIR` set.
 - The compliance hook flags 19 files in the upstream clone for SQL string concatenation (47 queue entries). Not edited here. Upstream code, needs human review of which values are user-supplied.
