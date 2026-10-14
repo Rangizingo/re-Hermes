@@ -7,8 +7,8 @@ Labels: **counted** = grep or count of source. **est.** = arithmetic. **not run*
 ## 1. Short version
 
 - Gateway platform messages enter through an adapter's `handle_message` (`gateway/platforms/base.py:4038`) and end in `agent.run_conversation` (`gateway/run_turn_runner.py:1724`). The loop itself is in [core-loop.md](core-loop.md).
-- Cron jobs live in `~/.hermes/cron/jobs.json`. An in-process ticker runs every 60 s by default (`cron/scheduler_provider.py:439`, **not run**). Output goes to the live adapter or to a SQLite queue.
-- Session and message state is one SQLite file, `~/.hermes/state.db`, behind `SessionDB` and 34 `hermes_state*.py` modules (**counted**).
+- Cron jobs live in `~/.hermes/cron/jobs.json` (`cron/jobs.py:85-89`). An in-process ticker runs every 60 s by default (`cron/scheduler_provider.py:439`, **not run**). Output goes to the live adapter or to a SQLite queue (`cron/scheduler_delivery.py:1973`, `cron/delivery_queue.py:77-82`).
+- Session and message state is one SQLite file, `~/.hermes/state.db` (`hermes_state.py:178`), behind `SessionDB` (`hermes_state.py:461`) and 34 `hermes_state*.py` modules (**counted**).
 - Each gateway turn reads the active transcript from state.db before the agent cache is checked (`gateway/run_turn.py:2096`).
 
 ## 2. Entry points
@@ -22,13 +22,13 @@ CLI and direct runs:
 Inbound path for a gateway message:
 1. An adapter calls `self.handle_message(event)`. Example: `_dispatch_with_text` at `plugins/platforms/telegram/adapter.py:6686`.
 2. `BasePlatformAdapter.handle_message` (`gateway/platforms/base.py:4038`) returns quickly by spawning a background task, per its docstring (`:4039-4040`). The task is created at `:3956`, in `_start_session_processing` (`:3949`). The task calls `self._message_handler(event)` at `:4579`, inside `_process_message_background` (`:4562`).
-3. The handler is set at `gateway/run_adapters.py:1355` from `_primary_message_handler` (`:1773`). With multiplexing on, that returns `_make_default_profile_message_handler` (`:1776`, defined `:1731-1741`), which calls `self._handle_message(event)`. With multiplexing off, it wraps `_handle_message` directly (`:1777`).
+3. The handler is set at `gateway/run_adapters.py:1355` from `_primary_message_handler` (`:1773`). With multiplexing on, that returns `_make_default_profile_message_handler` (`:1776`, defined `:1731-1743`), which calls `self._handle_message(event)`. With multiplexing off, it wraps `_handle_message` directly (`:1777`).
 4. `_handle_message` (`gateway/run_inbound.py:1285`) runs admission and busy checks. It calls `_handle_message_with_agent` (`gateway/run_inbound.py:1368`, defined at `gateway/run_turn.py:2144`).
 5. `_hmwa_prepare_turn` (`gateway/run_turn.py:2046`, call at `:2160`) reads the transcript at `:2096`. Then `_run_agent` (`:2197`, defined `:2928`) calls `_run_agent_inner` (`:2935`).
 6. `_run_agent_inner` calls `_run_agent_build_turn_context` (`gateway/run_turn.py:4303`, defined `:3061`). That creates `TurnRunner` (`:3102`). `_run_agent_inner` starts `turn_runner.run_sync` in a worker (`:4344`).
 7. `TurnRunner.run_sync` (`gateway/run_turn_runner.py:1884`) calls `_run_conversation_with_approval` (call at `:1949`, defined `:1684`). That passes the history as `conversation_history` (`:1697`) and calls `agent.run_conversation(api_message, **kwargs)` at `:1724`.
 
-Adapter files (**counted**: 32 adapter classes in 32 files. Query: `git grep -E '^class [A-Za-z_0-9]*Adapter[(:]'` at the pin, minus `BasePlatformAdapter` and the helper `_AiohttpBridgeAdapter`). `Platform` values are in `gateway/config.py:217-242`.
+Adapter files (**counted**: 32 adapter classes in 32 files. Query: `git grep -E '^class [A-Za-z_0-9]*Adapter[(:]' <pin> -- gateway plugins/platforms`, minus `BasePlatformAdapter` and the helper `_AiohttpBridgeAdapter`). `Platform` values are in `gateway/config.py:217-242`.
 
 Under `gateway/` (10, **counted**):
 - `gateway/platforms/api_server.py:1172` `APIServerAdapter`. `API_SERVER` (`gateway/config.py:232`).
@@ -72,8 +72,8 @@ Dynamic means no enum line. The enum says plugin platforms are created on demand
 
 Definition:
 - `create_job` (`cron/jobs.py:1813`) takes a prompt, a schedule string, a name, a repeat count, and a delivery target. Schedule strings parse into `once`, `interval`, or `cron` kinds (`cron/jobs.py:788-789`). Payload fields are `prompt`, `script`, `skill`, `skills`, and `no_agent` (`cron/jobs.py:469`).
-- The callers found use `create_job_with_scheduler_registration` (`cron/scheduler.py:4022`, which calls `create_job` at `:4027`). Callers: the cron tool (`tools/cronjob_tools.py:683`), blueprint CLI (`hermes_cli/blueprint_cmd.py:232`), dashboard (`hermes_cli/web_server_cron.py:165`), `tools/blueprints.py:145`, and `cron/suggestions.py:184`.
-- Edits go through `update_job` (`cron/jobs.py:2111`). Shipped definitions merge in through `import_job_definitions` (`cron/job_definition.py:48`).
+- The callers found use `create_job_with_scheduler_registration` (`cron/scheduler.py:4022`, which calls `create_job` at `:4027`). Callers: the cron tool (`tools/cronjob_tools.py:683`), blueprint CLI (`hermes_cli/blueprint_cmd.py:232`), dashboard (`hermes_cli/web_server_cron.py:165`), `tools/blueprints.py:145`, `cron/suggestions.py:184`, and the API server (`gateway/platforms/api_server.py:3908`).
+- Field edits go through `update_job` (`cron/jobs.py:2120`, saves at `:2147`). `rearm_oneshot` (`:2259`, saves at `:2279`) and `rewrite_skill_refs` (`:3480`, saves at `:3501`) call `save_jobs` directly. Shipped definitions merge in through `import_job_definitions` (`cron/job_definition.py:48`).
 
 Stored under `get_hermes_home()/cron` (`cron/jobs.py:85-89`):
 - `jobs.json`: definitions and schedule state (`:89`). Saved by `save_jobs` (`:1602`) under a cross-process lock (`:19`), with an atomic replace (`:1586`).
@@ -133,27 +133,28 @@ One line per module (from each module's docstring):
 - `hermes_state_user_copy.py`: plain-language storage-failure notices.
 - `hermes_state_wal.py`: journal mode and PRAGMA policy (macOS `synchronous=FULL`, `:117-121`).
 
-Tables (**counted**, `CREATE TABLE` and `CREATE VIRTUAL TABLE` grep over `hermes_state*.py`):
+Tables (**counted**: 16 static names from `CREATE TABLE` and `CREATE VIRTUAL TABLE` over `hermes_state*.py`, plus 2 Telegram topic tables from a tuple, 18 total):
 - Sessions and transcript: `schema_version` (`hermes_state_common.py:373`), `system_prompts` (`:377`), `sessions` (`:382`), `messages` (`:449`).
 - Usage and meta: `session_model_usage` (`:482`), `state_meta` (`:504`).
 - Gateway: `gateway_routing` (`:509`), `gateway_hygiene_state` (`:517`), `conversation_generations` (`:544`), `gateway_heartbeats` (`:559`).
 - Compression and turn locks: `compression_locks` (`:568`), `session_turn_leases` (`:575`).
 - Delegation: `async_delegations` (`:582`).
 - Full-text (FTS5): `messages_fts` (`:785`), `messages_fts_trigram` (`:905`), `messages_fts_cjk` (`hermes_state_fts.py:46`).
+- Telegram DM topic tables (from the tuple): `telegram_dm_topic_mode` (`hermes_state_telegram.py:30`), `telegram_dm_topic_bindings` (`:49`).
 
 Compression state lives in `hermes_state_compression.py` (module docstring) and the two lock and lease tables. The durable successor pointer is read through `get_compression_tip` (`gateway/session_transcript.py:641`).
 
 Default path:
 - `~/.hermes/state.db`. `DEFAULT_DB_PATH = get_hermes_home() / "state.db"` (`hermes_state.py:178`). `_default_db_path()` re-resolves it at call time (`:198-201`).
-- `get_hermes_home()` returns `HERMES_HOME` when set, else the platform default (`hermes_constants.py:111-118`, `:160-169`). The platform default is `~/.hermes`, plus `HERMES_DATA_DIR_SUFFIX` when set (`hermes_constants.py:51-58`).
-- No config setting sets the path. `hermes_cli/config_defaults.py` mentions state.db only in comments (for example `:2262`, `:2276`). The keys that act on it are `sessions.auto_prune: True` and `sessions.retention_days: 90` (`hermes_cli/config_defaults.py:2264-2278`).
+- `get_hermes_home()` returns the context-local override first, then `HERMES_HOME` when set, else the platform default (`hermes_constants.py:111-118`, `:160-169`). The platform default is `~/.hermes` on macOS and Linux, `%LOCALAPPDATA%\hermes` on Windows, with `HERMES_DATA_DIR_SUFFIX` appended when set (`hermes_constants.py:51-58`).
+- No config setting sets the path. `hermes_cli/config_defaults.py` mentions state.db only in comments (for example `:2262`, `:2276`). The keys in the `sessions` block that act on it are `auto_prune: True` and `retention_days: 90` (`hermes_cli/config_defaults.py:2264-2278`), plus `auto_archive: False` (`:2281`), `vacuum_after_prune: True` (`:2292`), and `min_interval_hours: 24` (`:2297`).
 
 ## 5. Which state reaches each model request
 
 Gateway turn:
-- `load_transcript` (`gateway/session_transcript.py:631`) calls `get_messages_as_conversation(..., repair_alternation=True)` (`:644-645`). The query is `ORDER BY id` with no row cap (`hermes_state_messages.py:1515-1518`). The only filter is `AND active = 1` from `_active_clause` (`hermes_state_messages.py:1388-1390`, call at `:1531`). `_read_all` is a plain `fetchall()` (`hermes_state.py:1136-1138`).
+- `load_transcript` (`gateway/session_transcript.py:631`) calls `get_messages_as_conversation(..., repair_alternation=True)` (`:644-645`). The query is `ORDER BY id` with no row cap (`hermes_state_messages.py:1515-1518`). The only filter beyond session scope (`:1517`) is `AND active = 1` from `_active_clause` (`hermes_state_messages.py:1388-1390`, call at `:1531`). `_read_all` is a plain `fetchall()` (`hermes_state.py:1136-1138`).
 - `_build_gateway_agent_history` (`gateway/run_turn_runner.py:1564`) builds the list. It goes into `run_conversation` as `conversation_history` (`:1697`, `:1724`).
-- On a cache hit, `_resolve_turn_agent` (`:1139`) reuses the cached agent (`:1152-1153`). The code then compares the reloaded transcript with the agent's live messages and picks one (`:1572-1573`, helper `_select_cached_agent_history`). So the database read happens on a cache hit too.
+- On a cache hit, `_resolve_turn_agent` (`:1139`) reuses the cached agent (`:1156-1157`). The code then compares the reloaded transcript with the agent's live messages and picks one (`:1572-1573`, helper `_select_cached_agent_history`). So the database read happens on a cache hit too.
 
 CLI resume:
 - `hermes_cli/cli_agent_setup_mixin.py:607-610` sets `self.conversation_history` from `get_messages_as_conversation(..., repair_alternation=True)`, minus `session_meta` rows.
@@ -166,15 +167,15 @@ Memory files (on disk, not state.db):
 - `agent/system_prompt.py:7-8` lists the volatile block: skills index, memory, and USER.md. `_memory_parts` (`:517`) builds the memory blocks.
 
 On demand only:
-- `session_search` (`tools/session_search_tool.py:619`, schema `:652`, registration `:787`). Text hints tell the model to call it after compaction (`agent/context_compressor.py:936`, `:998`). Apart from those hints, the only match in `agent/` and `gateway/` is the inline executor (`agent/inline_tool_executors.py:123`). No automatic history injection was found.
+- `session_search` (`tools/session_search_tool.py:619`, schema `:652`, registration `:787`). Text hints tell the model to call it after compaction (`agent/context_compressor.py:936`, `:998`). Apart from those hints, `session_search` appears in 38 lines across 20 files under `agent/` and `gateway/` (`git grep -n session_search <pin> -- agent gateway`). Most are guidance text, display, or tool-name tables. The inline executor is at `agent/inline_tool_executors.py:123`. No automatic history injection was found.
 
 ## 6. Top 3 speed-relevant findings
 
-1. **Each gateway turn reads the full active transcript before the cache check.** Label: code read, not timed. Evidence: `gateway/run_turn.py:2096` (read), `:2160` (prepare, which runs before the agent call at `:2197`), `hermes_state_messages.py:1515-1518` (no row cap, `fetchall()` at `hermes_state.py:1136-1138`), `gateway/run_turn_runner.py:1152-1153` (cache lookup, after the read). Read cost grows with transcript length.
+1. **Each gateway turn reads the full active transcript before the cache check.** Label: code read, not timed. Evidence: `gateway/run_turn.py:2096` (read), `:2160` (prepare, which runs before the agent call at `:2197`), `hermes_state_messages.py:1515-1518` (no row cap, `fetchall()` at `hermes_state.py:1136-1138`), `gateway/run_turn_runner.py:1156-1157` (cache lookup, after the read). Read cost grows with transcript length.
 
 2. **The macOS state DB runs with `PRAGMA synchronous=FULL`.** Label: code read, cost not run. Evidence: `hermes_state_wal.py:117-121` (the function, whose docstring cites a checkpoint race that can corrupt btree pages under NORMAL), applied from `_apply_wal_companions` (`:124-128`), which is called at `:290`, `:330`, and `:442`. FULL trades commit speed for durability. The per-commit cost was not measured.
 
-3. **Each message insert fires FTS5 index triggers.** Label: code read, cost not run. Evidence: insert triggers on `messages` at `hermes_state_common.py:793` and `:913`. A second `messages_fts_insert` definition appears at `:992`; which branch uses it was not traced. The config comment says unbounded growth "slows FTS5 inserts" (`hermes_cli/config_defaults.py:2262-2263`). Auto-prune defaults on, with 90 days retention (`:2269`, `:2278`). The comment is the authors' claim, not a measurement.
+3. **Each message insert fires two FTS5 triggers, each gated by row role or session.** Label: code read, cost not run. Evidence: `messages_fts_insert` at `hermes_state_common.py:793` (rebuild-window condition at `:794-797`) and `messages_fts_trigram_insert` at `:913` (non-tool rows in eligible sessions, `:914-916`). A second `messages_fts_insert` definition appears at `:992`; which branch uses it was not traced. The config comment says unbounded growth "slows FTS5 inserts" (`hermes_cli/config_defaults.py:2262-2263`). Auto-prune defaults on, with 90 days retention (`:2269`, `:2278`). The comment is the authors' claim, not a measurement.
 
 ## 7. Not verified
 
